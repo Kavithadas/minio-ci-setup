@@ -1,0 +1,76 @@
+# .github/workflows/minio-integration-tests.yml
+
+name: MinIO Integration Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      minio:
+        image: minio/minio:latest
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      AWS_ACCESS_KEY_ID:     minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION:            us-east-1
+      S3_ENDPOINT:           http://localhost:9000
+      TEST_BUCKET:           integration-tests
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Wait for MinIO
+        run: |
+          echo "Waiting for MinIO at $S3_ENDPOINT …"
+          for i in $(seq 1 20); do
+            curl -sf "$S3_ENDPOINT/minio/health/live" && echo "MinIO is up!" && break
+            echo "  attempt $i – retrying in 3 s"
+            sleep 3
+          done
+
+      - name: Create test bucket
+        run: |
+          curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc \
+               -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+          mc alias set local "$S3_ENDPOINT" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
+          mc mb --ignore-existing "local/$TEST_BUCKET"
+          echo "Bucket '$TEST_BUCKET' ready."
+
+      - name: Run integration tests
+        run: npm run test:integration
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: logs/
+          retention-days: 7
